@@ -53,7 +53,9 @@
 #include <linux/scatterlist.h>
 #include <linux/delay.h>
 #include <linux/types.h>
+#include <linux/gpio.h>
 #include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/of_device.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/sizes.h>
@@ -174,6 +176,8 @@ struct uart_amba_port {
 	bool			autorts;
 	unsigned int		fixed_baud;	/* vendor-set fixed baud rate */
 	char			type[12];
+	bool			rs485_enabled;
+	unsigned int	rs485_de_pin;
 #ifdef CONFIG_DMA_ENGINE
 	/* DMA stuff */
 	bool			using_tx_dma;
@@ -1180,6 +1184,12 @@ static void pl011_stop_tx(struct uart_port *port)
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
 
+	if(uap->rs485_enabled) {
+		while (readl(port->membase + UART01x_FR) & UART01x_FR_BUSY)
+			udelay(1);
+		gpio_set_value(uap->rs485_de_pin, 0);
+	}
+
 	uap->im &= ~UART011_TXIM;
 	writew(uap->im, uap->port.membase + UART011_IMSC);
 	pl011_dma_tx_stop(uap);
@@ -1199,6 +1209,9 @@ static void pl011_start_tx(struct uart_port *port)
 {
 	struct uart_amba_port *uap =
 	    container_of(port, struct uart_amba_port, port);
+
+	if(uap->rs485_enabled)
+		gpio_set_value(uap->rs485_de_pin, 1);
 
 	if (!pl011_dma_tx_start(uap))
 		pl011_start_tx_pio(uap);
@@ -2304,16 +2317,46 @@ static int pl011_find_free_port(void)
 	return -EBUSY;
 }
 
+static int of_gpio_get_pin(struct device_node *np, unsigned int *de_pin)
+{
+	if (of_gpio_count(np) < 1)
+		return -ENODEV;
+
+	*de_pin = of_get_gpio(np, 0);
+
+	if (*de_pin == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
+	if (!gpio_is_valid(*de_pin)) {
+		pr_err("%s: invalid GPIO pin, de=%d\n", np->full_name, *de_pin);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static int pl011_setup_port(struct device *dev, struct uart_amba_port *uap,
 			    struct resource *mmiobase, int index)
 {
 	void __iomem *base;
+	unsigned int de_pin = 0, rs485_enabled = 0;
+	int ret;
 
 	base = devm_ioremap_resource(dev, mmiobase);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
 	index = pl011_probe_dt_alias(index, dev);
+
+	if (dev->of_node && of_property_read_bool(dev->of_node, "rs485-enabled")) {
+		ret = of_gpio_get_pin(dev->of_node, &de_pin);
+		if (ret)
+			return ret;
+
+		rs485_enabled = 1;
+		dev_info(dev, "using pin %u (DE)\n", de_pin);
+		gpio_direction_output(de_pin, 0);
+	}
 
 	uap->old_cr = 0;
 	uap->port.dev = dev;
@@ -2323,6 +2366,8 @@ static int pl011_setup_port(struct device *dev, struct uart_amba_port *uap,
 	uap->port.fifosize = uap->fifosize;
 	uap->port.flags = UPF_BOOT_AUTOCONF;
 	uap->port.line = index;
+	uap->rs485_de_pin = de_pin;
+	uap->rs485_enabled = rs485_enabled;
 
 	amba_ports[index] = uap;
 
