@@ -360,7 +360,7 @@
 				>;
 
 				i2c-gpio,scl-open-drain;
-				i2c-gpio,delay-us = <2>;    /* ~100 kHz */
+				i2c-gpio,delay-us = <10>;    /* ~50 kHz */
 				#address-cells = <1>;
 				#size-cells = <0>;
 				status = "okay";
